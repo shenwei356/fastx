@@ -1,0 +1,20 @@
+[package]
+authors = ["Wei Shen <shenwei356@gmail.com>"]
+name = "fastx"
+version = "0.1.0"
+edition = "2024"
+description = "fastx is a Rust crate for parsing and writing FASTA/Q sequences"
+keywords = ["bioinformatics", "fasta", "fastq"]
+categories = ["command-line-utilities", "science"]
+homepage = "https://github.com/shenwei356/fastx"
+documentation = "https://github.com/shenwei356/fastx"
+repository = "https://github.com/shenwei356/fastx"
+readme = "README.md"
+
+[dependencies]
+buffer-redux = "1.1.0"
+bzip2 = "0.6.1"
+flate2 = "1.1.5"
+memchr = "2.7.6"
+xz2 = "0.1.7"
+zstd = "0.13.3"
