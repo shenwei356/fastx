@@ -1,9 +1,11 @@
-use bzip2::read::BzDecoder;
-use flate2::read::GzDecoder;
+use bzip2::read::{BzDecoder, BzEncoder};
+use flate2::Compression;
+use flate2::read::{GzDecoder, GzEncoder};
 use std::fs::File;
-use std::io::{self, BufRead, BufReader};
-use xz2::read::XzDecoder;
+use std::io::{self, BufRead, BufReader, BufWriter, Write};
+use xz2::read::{XzDecoder, XzEncoder};
 use zstd::stream::read::Decoder as ZstdDecoder;
+use zstd::stream::write::Encoder as ZstdEncoder;
 
 pub fn xopen(file: &str) -> io::Result<Box<dyn BufRead>> {
     let mut r: Box<dyn BufRead> = if file == "-" {
@@ -33,6 +35,33 @@ pub fn xopen(file: &str) -> io::Result<Box<dyn BufRead>> {
     };
 
     Ok(reader)
+}
+
+pub fn xwrite(path: &str) -> io::Result<Box<dyn Write>> {
+    if path == "-" {
+        return Ok(Box::new(io::BufWriter::new(io::stdout())));
+    }
+
+    let file = File::create(path)?;
+
+    let writer: Box<dyn Write> = if path.ends_with(".gz") {
+        Box::new(BufWriter::new(GzEncoder::new(file, Compression::default())))
+    } else if path.ends_with(".xz") {
+        Box::new(BufWriter::new(XzEncoder::new(file, 6)))
+    } else if path.ends_with(".bz2") {
+        Box::new(BufWriter::new(BzEncoder::new(
+            file,
+            bzip2::Compression::default(),
+        )))
+    } else if path.ends_with(".zst") || path.ends_with(".zstd") {
+        let encoder = ZstdEncoder::new(file, 0)?; // level 0 = default
+        Box::new(BufWriter::new(encoder.auto_finish()))
+    } else {
+        // no compression
+        Box::new(BufWriter::new(file))
+    };
+
+    Ok(writer)
 }
 
 // pub(crate) fn trim_cr(line: &[u8]) -> &[u8] {

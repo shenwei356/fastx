@@ -1,6 +1,6 @@
 use std::io::{self, BufRead};
 
-mod util;
+pub mod util;
 use util::*;
 
 mod seq;
