@@ -3,19 +3,8 @@ use std::io::{self, BufRead};
 mod util;
 use util::*;
 
-#[derive(Debug, Clone, Copy)]
-pub struct Seq<'a> {
-    pub id: &'a [u8],
-    pub desc: &'a [u8],
-    pub seq: &'a [u8],
-    pub qual: Option<&'a [u8]>,
-}
-
-impl<'a> Seq<'a> {
-    pub fn is_fastq(&self) -> bool {
-        self.qual.is_some()
-    }
-}
+mod seq;
+use seq::*;
 
 pub struct Reader<R: BufRead> {
     reader: R,
