@@ -4,13 +4,14 @@ mod util;
 use util::*;
 
 #[derive(Debug, Clone, Copy)]
-pub struct Sequence<'a> {
+pub struct Seq<'a> {
     pub id: &'a [u8],
+    pub desc: &'a [u8],
     pub seq: &'a [u8],
     pub qual: Option<&'a [u8]>,
 }
 
-impl<'a> Sequence<'a> {
+impl<'a> Seq<'a> {
     pub fn is_fastq(&self) -> bool {
         self.qual.is_some()
     }
@@ -35,16 +36,16 @@ impl<R: BufRead> Reader<R> {
     pub fn from_reader(reader: R) -> Self {
         Self {
             reader: reader,
-            record_buf: Vec::new(),
-            line_buf: Vec::new(),
+            record_buf: Vec::with_capacity(1024),
+            line_buf: Vec::with_capacity(128),
             lookahead_line: None,
         }
     }
 
-    pub fn next(&mut self) -> Option<Sequence<'_>> {
+    pub fn next(&mut self) -> Option<Seq<'_>> {
         self.record_buf.clear();
 
-        // --- Step 1: load or read Header ---
+        // --- Step 1: load or read Header into self.line_buf ---
 
         if self.lookahead_line.is_some() {
             std::mem::swap(&mut self.line_buf, self.lookahead_line.as_mut().unwrap());
@@ -58,34 +59,23 @@ impl<R: BufRead> Reader<R> {
             }
         }
 
-        let line_len: usize = self.line_buf.len();
-        if line_len == 0 {
-            // shoud not reach here
-            return None;
-        }
-
         let is_fastq = match self.line_buf[0] {
             b'>' => false,
             b'@' => true,
             _ => return None, // not a valid fasta/q record
         };
 
-        let header_content: &[u8] = trim_crlf(&self.line_buf);
-        let id_content: &[u8] = if header_content.len() > 0 {
-            &header_content[1..]
-        } else {
-            &[]
-        };
-
-        self.record_buf.extend_from_slice(id_content);
-        let id_end = self.record_buf.len();
+        // extract header from the header line and store it into record_buf
+        let header: &[u8] = trim_crlf(&self.line_buf).get(1..).unwrap_or(&[]);
+        self.record_buf.extend_from_slice(header);
+        let header_end = self.record_buf.len();
 
         // --- Step 2: read Sequence ---
 
         loop {
             self.line_buf.clear();
             match self.reader.read_until(b'\n', &mut self.line_buf) {
-                Ok(0) => break, // EOF
+                Ok(0) => break, // EOF,
                 Ok(_) => {
                     let first = self.line_buf[0];
 
@@ -100,10 +90,8 @@ impl<R: BufRead> Reader<R> {
                         break;
                     }
 
-                    let valid_len = self.line_buf.len();
-                    if valid_len > 0 {
-                        let clean_seq = trim_crlf(&self.line_buf);
-                        self.record_buf.extend_from_slice(clean_seq);
+                    if self.line_buf.len() > 0 {
+                        self.record_buf.extend_from_slice(trim_crlf(&self.line_buf));
                     }
                 }
                 Err(_) => break,
@@ -115,7 +103,7 @@ impl<R: BufRead> Reader<R> {
         // --- Step 3: read Quality ---
 
         if is_fastq {
-            let seq_len = seq_end - id_end;
+            let seq_len = seq_end - header_end;
             let mut qual_read_len = 0;
 
             while qual_read_len < seq_len {
@@ -137,8 +125,8 @@ impl<R: BufRead> Reader<R> {
         }
 
         let buf_slice: &Vec<u8> = &self.record_buf;
-        let id_slice: &[u8] = &buf_slice[0..id_end];
-        let seq_slice: &[u8] = &buf_slice[id_end..seq_end];
+        let id_slice: &[u8] = &buf_slice[0..header_end];
+        let seq_slice: &[u8] = &buf_slice[header_end..seq_end];
 
         let qual_slice: Option<&[u8]> = if is_fastq {
             let q_len: usize = buf_slice.len() - seq_end;
@@ -150,11 +138,28 @@ impl<R: BufRead> Reader<R> {
             None
         };
 
-        Some(Sequence {
-            id: id_slice,
+        let (id, desc) = parse_header(id_slice);
+        Some(Seq {
+            id: id,
+            desc: desc,
             seq: seq_slice,
             qual: qual_slice,
         })
+    }
+}
+
+fn parse_header(header_line: &[u8]) -> (&[u8], &[u8]) {
+    match header_line.iter().position(|&b| b == b' ' || b == b'\t') {
+        Some(id_end) => {
+            let id_slice = &header_line[0..id_end]; // id_end might be 0
+            let remainder = &header_line[id_end..];
+            let desc_start_offset = remainder
+                .iter()
+                .position(|&b| b != b' ' && b != b'\t')
+                .unwrap_or(remainder.len());
+            (id_slice, &header_line[id_end + desc_start_offset..])
+        }
+        None => (header_line, &[]), // no blank or tab
     }
 }
 
@@ -163,14 +168,15 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
-    fn read_to_owned(input: &str) -> Vec<(String, String, Option<String>)> {
+    fn read_to_owned(input: &str) -> Vec<(String, String, String, Option<String>)> {
         let cursor: Cursor<&[u8]> = Cursor::new(input.as_bytes());
         let mut reader: Reader<Cursor<&[u8]>> = Reader::from_reader(cursor);
-        let mut results: Vec<(String, String, Option<String>)> = Vec::new();
+        let mut results: Vec<(String, String, String, Option<String>)> = Vec::new();
 
         while let Some(seq) = reader.next() {
             results.push((
                 String::from_utf8_lossy(seq.id).to_string(),
+                String::from_utf8_lossy(seq.desc).to_string(),
                 String::from_utf8_lossy(seq.seq).to_string(),
                 seq.qual.map(|q| String::from_utf8_lossy(q).to_string()),
             ));
@@ -197,37 +203,52 @@ mod tests {
     #[test]
     fn test_fasta_standard_single_and_multi_line() {
         let input = "\
->seq1
+>seq1 desc
 ACTG
->seq2 description
+>seq2  desc2
 AAAA
 TTTT
 GGGG
 CCCC
+>\tdesc3
+AAAA
+>    \t
+AAAA
 ";
         let results = read_to_owned(input);
 
-        assert_eq!(results.len(), 2);
+        assert_eq!(results.len(), 4);
 
         // Record 1: single-line Seq
         assert_eq!(results[0].0, "seq1");
-        assert_eq!(results[0].1, "ACTG");
-        assert_eq!(results[0].2, None);
+        assert_eq!(results[0].1, "desc");
+        assert_eq!(results[0].2, "ACTG");
+        assert_eq!(results[0].3, None);
 
         // Record 2: multi-line Seq
-        assert_eq!(results[1].0, "seq2 description");
-        assert_eq!(results[1].1, "AAAATTTTGGGGCCCC");
-        assert_eq!(results[1].2, None);
+        assert_eq!(results[1].0, "seq2");
+        assert_eq!(results[1].1, "desc2");
+        assert_eq!(results[1].3, None);
+
+        // Record 2: empty id and non-empty description
+        assert_eq!(results[2].0, "");
+        assert_eq!(results[2].1, "desc3");
+        assert_eq!(results[2].2, "AAAA");
+
+        // Record 2: empty id and empty description
+        assert_eq!(results[3].0, "");
+        assert_eq!(results[3].1, "");
+        assert_eq!(results[3].2, "AAAA");
     }
 
     #[test]
     fn test_fastq_standard_single_and_multi_line() {
         let input = "\
-@read1
+@read1 desc
 ACGT
 +
 IIII
-@read2
+@read2 \tdesc2
 AC
 GT
 +
@@ -240,13 +261,40 @@ II
 
         // Record 1: 4-line FASTQ
         assert_eq!(results[0].0, "read1");
-        assert_eq!(results[0].1, "ACGT");
-        assert_eq!(results[0].2, Some("IIII".to_string()));
+        assert_eq!(results[0].1, "desc");
+        assert_eq!(results[0].2, "ACGT");
+        assert_eq!(results[0].3, Some("IIII".to_string()));
 
         // Record 2: multi-line FASTQ
         assert_eq!(results[1].0, "read2");
-        assert_eq!(results[1].1, "ACGT");
-        assert_eq!(results[1].2, Some("IIII".to_string()));
+        assert_eq!(results[1].1, "desc2");
+        assert_eq!(results[1].2, "ACGT");
+        assert_eq!(results[1].3, Some("IIII".to_string()));
+    }
+
+    #[test]
+    fn test_fasta_edge_cases_empty_seq() {
+        let input = "\
+>seq1
+";
+        let results = read_to_owned(input);
+        assert_eq!(results.len(), 1);
+
+        assert_eq!(results[0].0, "seq1");
+        assert_eq!(results[0].2, "");
+    }
+
+    #[test]
+    fn test_fasta_edge_cases_empty_seq2() {
+        let input = "\
+>seq1
+
+";
+        let results = read_to_owned(input);
+        assert_eq!(results.len(), 1);
+
+        assert_eq!(results[0].0, "seq1");
+        assert_eq!(results[0].2, "");
     }
 
     #[test]
@@ -257,7 +305,7 @@ II
         assert_eq!(results.len(), 1);
 
         assert_eq!(results[0].0, "seq1");
-        assert_eq!(results[0].1, "");
+        assert_eq!(results[0].2, "");
     }
 
     #[test]
@@ -277,19 +325,19 @@ ACGT
 
         // Case 1: Empty ID, Normal Seq
         assert_eq!(results[0].0, "");
-        assert_eq!(results[0].1, "ACGT");
+        assert_eq!(results[0].2, "ACGT");
 
         // Case 2: Normal ID, Empty Seq
         assert_eq!(results[1].0, "seq_empty");
-        assert_eq!(results[1].1, "");
+        assert_eq!(results[1].2, "");
 
         // Case 3: Empty ID, Empty Seq
         assert_eq!(results[2].0, "");
-        assert_eq!(results[2].1, "");
+        assert_eq!(results[2].2, "");
 
         // Case 4: Last check
         assert_eq!(results[3].0, "last");
-        assert_eq!(results[3].1, "");
+        assert_eq!(results[3].2, "");
     }
 
     #[test]
@@ -306,8 +354,8 @@ JJJJ
         assert_eq!(results.len(), 1);
 
         assert_eq!(results[0].0, "long_seq");
-        assert_eq!(results[0].1, "AAAABBBB"); // 8 chars
-        assert_eq!(results[0].2, Some("JJJJJJJJ".to_string())); // 8 chars
+        assert_eq!(results[0].2, "AAAABBBB"); // 8 chars
+        assert_eq!(results[0].3, Some("JJJJJJJJ".to_string())); // 8 chars
     }
 
     #[test]
@@ -317,7 +365,7 @@ JJJJ
 
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].0, "win");
-        assert_eq!(results[0].1, "ACGT");
-        assert_eq!(results[1].1, "TGCA");
+        assert_eq!(results[0].2, "ACGT");
+        assert_eq!(results[1].2, "TGCA");
     }
 }
