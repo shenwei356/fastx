@@ -3,6 +3,7 @@ use flate2::Compression;
 use flate2::read::{GzDecoder, GzEncoder};
 use liblzma::read::{XzDecoder, XzEncoder};
 use std::fs::File;
+use std::io::IsTerminal;
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use zstd::stream::read::Decoder as ZstdDecoder;
 use zstd::stream::write::Encoder as ZstdEncoder;
@@ -11,6 +12,12 @@ pub fn xopen(file: &str, buf_size: usize) -> io::Result<Box<dyn BufRead>> {
     let buf_size = buf_size.max(4096);
 
     let mut r: Box<dyn BufRead> = if file == "-" {
+        if io::stdin().is_terminal() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "no data detected in STDIN",
+            ));
+        }
         Box::new(BufReader::with_capacity(buf_size, io::stdin().lock()))
     } else {
         Box::new(BufReader::with_capacity(buf_size, File::open(file)?))
