@@ -31,6 +31,30 @@ impl<'a> Seq<'a> {
         }
         result
     }
+
+    pub fn count_base(&self, base: u8) -> usize {
+        self.seq.iter().copied().filter(|&b| b == base).count()
+    }
+
+    pub fn count_base_fn(&self, f: fn(&u8) -> bool) -> usize {
+        self.seq.iter().copied().filter(f).count()
+    }
+
+    pub fn count_bases(&self, bases: &[u8]) -> usize {
+        let mut table = [0u8; 256];
+        for b in bases {
+            table[*b as usize] = 1;
+        }
+
+        self.seq.iter().map(|&b| table[b as usize] as usize).sum()
+    }
+
+    pub fn gc_content(&self) -> f32 {
+        if self.seq.len() == 0 {
+            return 0.0;
+        }
+        self.count_base_fn(|&b| matches!(b, b'A' | b'C' | b'G' | b'T')) as f32 / self.len() as f32
+    }
 }
 
 const RC_TABLE: [u8; 256] = make_rc_table();
@@ -128,5 +152,23 @@ mod tests {
         let seq_unknown = b"N?";
         let expected_unknown = b"NN";
         assert_eq!(a_seq(seq_unknown).rc(), expected_unknown);
+    }
+
+    #[test]
+    fn test_base_counting() {
+        let seq = b"ACGTNacgtn";
+        assert_eq!(a_seq(seq).count_base(b'a'), 1);
+
+        let seq = b"ACGTNacgtn";
+        assert_eq!(a_seq(seq).count_bases(b"Aa"), 2);
+
+        let seq = b"ACGTNacgtn";
+        assert_eq!(a_seq(seq).count_base_fn(|&b| b == b'a' || b == b'A'), 2);
+
+        let seq = b"ACGTNacgtn";
+        assert_eq!(a_seq(seq).gc_content(), 0.4);
+
+        let seq = b"";
+        assert_eq!(a_seq(seq).gc_content(), 0.0);
     }
 }
