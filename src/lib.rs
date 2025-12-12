@@ -15,6 +15,8 @@ pub struct Reader<R: BufRead> {
     record_buf: Vec<u8>,
     line_buf: Vec<u8>,
     lookahead_line: Option<Vec<u8>>,
+
+    parse_id: bool,
 }
 
 impl Reader<Box<dyn BufRead>> {
@@ -31,7 +33,12 @@ impl<R: BufRead> Reader<R> {
             record_buf: Vec::with_capacity(1 << 20),
             line_buf: Vec::with_capacity(128),
             lookahead_line: None,
+            parse_id: true,
         }
+    }
+
+    pub fn skip_id_parsing(&mut self) {
+        self.parse_id = false
     }
 
     pub fn next(&mut self) -> Option<Result<Seq<'_>, FastxErr>> {
@@ -138,10 +145,18 @@ impl<R: BufRead> Reader<R> {
             None
         };
 
-        let (id, desc) = parse_header(id_slice);
+        if self.parse_id {
+            let (id, desc) = parse_header(id_slice);
+            return Some(Ok(Seq {
+                id: id,
+                desc: desc,
+                seq: seq_slice,
+                qual: qual_slice,
+            }));
+        }
         Some(Ok(Seq {
-            id: id,
-            desc: desc,
+            id: id_slice,
+            desc: &[],
             seq: seq_slice,
             qual: qual_slice,
         }))
