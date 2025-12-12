@@ -61,7 +61,7 @@ impl<R: BufRead> Reader<R> {
         };
 
         // extract header from the header line and store it into record_buf
-        let header: &[u8] = trim_crlf(&self.line_buf).get(1..).unwrap_or(&[]);
+        let header: &[u8] = &trim_crlf(&self.line_buf)[1..];
         self.record_buf.extend_from_slice(header);
         let header_end = self.record_buf.len();
 
@@ -77,7 +77,8 @@ impl<R: BufRead> Reader<R> {
 
                     // next FASTA record
                     if first == b'>' {
-                        self.lookahead_line = Some(self.line_buf.clone());
+                        // self.lookahead_line = Some(self.line_buf.clone());
+                        self.lookahead_line = Some(std::mem::take(&mut self.line_buf));
                         break;
                     }
 
@@ -147,19 +148,33 @@ impl<R: BufRead> Reader<R> {
     }
 }
 
-fn parse_header(header_line: &[u8]) -> (&[u8], &[u8]) {
-    match header_line.iter().position(|&b| b == b' ' || b == b'\t') {
-        Some(id_end) => {
-            let id_slice = &header_line[0..id_end]; // id_end might be 0
-            let remainder = &header_line[id_end..];
-            let desc_start_offset = remainder
-                .iter()
-                .position(|&b| b != b' ' && b != b'\t')
-                .unwrap_or(remainder.len());
-            (id_slice, &header_line[id_end + desc_start_offset..])
-        }
-        None => (header_line, &[]), // no blank or tab
+fn parse_header(line: &[u8]) -> (&[u8], &[u8]) {
+    // match line.iter().position(|&b| b == b' ' || b == b'\t') {
+    //     Some(id_end) => {
+    //         let id_slice = &line[0..id_end]; // id_end might be 0
+    //         let remainder = &line[id_end..];
+    //         let desc_start_offset = remainder
+    //             .iter()
+    //             .position(|&b| b != b' ' && b != b'\t')
+    //             .unwrap_or(remainder.len());
+    //         (id_slice, &line[id_end + desc_start_offset..])
+    //     }
+    //     None => (line, &[]), // no blank or tab
+    // }
+
+    let mut i = 0;
+    let n = line.len();
+
+    while i < n && line[i] != b' ' && line[i] != b'\t' {
+        i += 1;
     }
+    let id = &line[..i];
+
+    while i < n && (line[i] == b' ' || line[i] == b'\t') {
+        i += 1;
+    }
+
+    (id, &line[i..])
 }
 
 #[cfg(test)]

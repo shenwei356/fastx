@@ -89,16 +89,35 @@ pub fn xwrite(path: &str, buf_size: usize) -> io::Result<Box<dyn Write>> {
 //     }
 // }
 
+#[inline(always)]
 pub(crate) fn trim_crlf(line: &[u8]) -> &[u8] {
-    let mut line = line;
+    // let mut line = line;
+    // if let Some((&b'\n', remaining)) = line.split_last() {
+    //     line = remaining;
+    // }
+    // if let Some((&b'\r', remaining)) = line.split_last() {
+    //     line = remaining;
+    // }
+    // line
 
-    if let Some((&b'\n', remaining)) = line.split_last() {
-        line = remaining;
+    let mut end = line.len();
+    if end > 0 && line[end - 1] == b'\n' {
+        end -= 1;
     }
-
-    if let Some((&b'\r', remaining)) = line.split_last() {
-        line = remaining;
+    if end > 0 && line[end - 1] == b'\r' {
+        end -= 1;
     }
-
-    line
+    &line[..end]
 }
+
+// #[inline(always)]
+// unsafe fn trim_crlf_mut(v: &mut Vec<u8>) -> &[u8] {
+//     let mut len = v.len();
+//     if len > 0 && *v.get_unchecked(len - 1) == b'\n' {
+//         len -= 1;
+//     }
+//     if len > 0 && *v.get_unchecked(len - 1) == b'\r' {
+//         len -= 1;
+//     }
+//     v.get_unchecked(0..len)
+// }
