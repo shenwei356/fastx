@@ -193,13 +193,12 @@ fn parse_header(line: &[u8]) -> (&[u8], &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
+    use std::io::{BufReader, Cursor};
 
-    fn read_to_owned(
-        input: &str,
+    fn read_to_owned_from_reader<R: BufRead>(
+        reader: R,
     ) -> Result<Vec<(String, String, String, Option<String>)>, FastxErr> {
-        let cursor: Cursor<&[u8]> = Cursor::new(input.as_bytes());
-        let mut reader: Reader<Cursor<&[u8]>> = Reader::from_reader(cursor);
+        let mut reader: Reader<R> = Reader::from_reader(reader);
         let mut results: Vec<(String, String, String, Option<String>)> = Vec::new();
 
         while let Some(res) = reader.next() {
@@ -213,6 +212,12 @@ mod tests {
             ));
         }
         Ok(results)
+    }
+
+    fn read_to_owned(
+        input: &str,
+    ) -> Result<Vec<(String, String, String, Option<String>)>, FastxErr> {
+        read_to_owned_from_reader(Cursor::new(input.as_bytes()))
     }
 
     #[test]
@@ -479,5 +484,25 @@ KKKKK
         assert_eq!(seqs[0].0, "win");
         assert_eq!(seqs[0].2, "ACGT");
         assert_eq!(seqs[1].2, "TGCA");
+    }
+
+    #[test]
+    fn test_fastq_small_buffer_and_no_final_lf() {
+        let input = "\
+@read1 desc
+ACGTACGT
++
+IIIIIIII";
+        let reader = BufReader::with_capacity(3, Cursor::new(input.as_bytes()));
+        let results = read_to_owned_from_reader(reader);
+
+        assert!(results.is_ok());
+        let seqs = results.unwrap();
+
+        assert_eq!(seqs.len(), 1);
+        assert_eq!(seqs[0].0, "read1");
+        assert_eq!(seqs[0].1, "desc");
+        assert_eq!(seqs[0].2, "ACGTACGT");
+        assert_eq!(seqs[0].3, Some("IIIIIIII".to_string()));
     }
 }
