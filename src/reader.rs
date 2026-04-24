@@ -1,6 +1,7 @@
 use crate::errors::*;
 use crate::seq::*;
 use crate::util::*;
+use memchr::memchr;
 use std::io::BufRead;
 
 pub struct Reader<R: BufRead> {
@@ -38,6 +39,44 @@ impl<R: BufRead> Reader<R> {
         self.parse_id = false
     }
 
+    fn read_line_fill_buf(&mut self) -> std::io::Result<usize> {
+        self.line_buf.clear();
+
+        let mut total = 0;
+        loop {
+            let (consumed, done) = {
+                let buf = self.reader.fill_buf()?;
+                if buf.is_empty() {
+                    // EOF
+                    return Ok(total);
+                }
+
+                // find the position of the first '\n' in the buffer
+                match memchr(b'\n', buf) {
+                    Some(pos) => {
+                        // found a line ending
+                        let end = pos + 1;
+                        self.line_buf.extend_from_slice(&buf[..end]);
+                        (end, true)
+                    }
+                    None => {
+                        // no line ending found, consume the entire buffer and continue reading
+                        self.line_buf.extend_from_slice(buf);
+                        (buf.len(), false)
+                    }
+                }
+            };
+
+            self.reader.consume(consumed);
+            total += consumed;
+
+            if done {
+                return Ok(total);
+            }
+            // else continue reading until we find a line ending or reach EOF
+        }
+    }
+
     pub fn next(&mut self) -> Option<Result<Seq<'_>, FastxErr>> {
         self.record_buf.clear();
 
@@ -46,8 +85,7 @@ impl<R: BufRead> Reader<R> {
         if self.lookahead_line.is_none() {
             // first record
             loop {
-                self.line_buf.clear();
-                match self.reader.read_until(b'\n', &mut self.line_buf) {
+                match self.read_line_fill_buf() {
                     Ok(0) => return None,                           // EOF
                     Ok(_) if self.line_buf[0] == b'\n' => continue, // empty line with only '\n'
                     Ok(_) => break,                                 // a non-empty line
@@ -73,8 +111,7 @@ impl<R: BufRead> Reader<R> {
         // --- Step 2: read Sequence ---
 
         loop {
-            self.line_buf.clear();
-            match self.reader.read_until(b'\n', &mut self.line_buf) {
+            match self.read_line_fill_buf() {
                 Ok(0) => break,                                 // EOF,
                 Ok(_) if self.line_buf[0] == b'\n' => continue, // empty line with only '\n'
                 Ok(_) => {
@@ -107,8 +144,7 @@ impl<R: BufRead> Reader<R> {
             let mut qual_read_len = 0;
 
             while qual_read_len < seq_len {
-                self.line_buf.clear();
-                match self.reader.read_until(b'\n', &mut self.line_buf) {
+                match self.read_line_fill_buf() {
                     Ok(0) => break,                                 // Unexpected EOF in FASTQ
                     Ok(_) if self.line_buf[0] == b'\n' => continue, // empty line with only '\n'
                     Ok(_) => {
