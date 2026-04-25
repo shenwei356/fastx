@@ -1,7 +1,7 @@
 use crate::errors::*;
 use crate::seq::*;
 use crate::util::*;
-use memchr::memchr;
+use memchr::{memchr, memchr2};
 use std::io::BufRead;
 
 pub struct Reader<R: BufRead> {
@@ -11,7 +11,8 @@ pub struct Reader<R: BufRead> {
 
     record_buf: Vec<u8>,
     line_buf: Vec<u8>,
-    lookahead_line: Option<Vec<u8>>,
+    lookahead_line: Vec<u8>,
+    has_lookahead: bool,
 
     parse_id: bool,
 }
@@ -26,11 +27,12 @@ impl Reader<Box<dyn BufRead>> {
 impl<R: BufRead> Reader<R> {
     pub fn from_reader(reader: R) -> Self {
         Self {
-            reader: reader,
+            reader,
             is_fastq: false,
             record_buf: Vec::with_capacity(1 << 20),
             line_buf: Vec::with_capacity(1024),
-            lookahead_line: None,
+            lookahead_line: Vec::with_capacity(1024),
+            has_lookahead: false,
             parse_id: true,
         }
     }
@@ -39,6 +41,7 @@ impl<R: BufRead> Reader<R> {
         self.parse_id = false
     }
 
+    #[inline]
     fn read_line_fill_buf(&mut self) -> std::io::Result<usize> {
         self.line_buf.clear();
 
@@ -77,50 +80,60 @@ impl<R: BufRead> Reader<R> {
         }
     }
 
+    #[inline]
+    fn read_next_nonempty_line(&mut self) -> Result<bool, FastxErr> {
+        loop {
+            match self.read_line_fill_buf() {
+                Ok(0) => return Ok(false),
+                Ok(_) if trim_crlf(&self.line_buf).is_empty() => continue,
+                Ok(_) => return Ok(true),
+                Err(e) => return Err(FastxErr::IOError(e)),
+            }
+        }
+    }
+
     pub fn next(&mut self) -> Option<Result<Seq<'_>, FastxErr>> {
         self.record_buf.clear();
 
         // --- Step 1: load or read Header into self.line_buf ---
 
-        if self.lookahead_line.is_none() {
+        if !self.has_lookahead {
             // first record
-            loop {
-                match self.read_line_fill_buf() {
-                    Ok(0) => return None,                           // EOF
-                    Ok(_) if self.line_buf[0] == b'\n' => continue, // empty line with only '\n'
-                    Ok(_) => break,                                 // a non-empty line
-                    Err(e) => return Some(Err(FastxErr::IOError(e))),
-                }
+            match self.read_next_nonempty_line() {
+                Ok(false) => return None,
+                Ok(true) => {}
+                Err(e) => return Some(Err(e)),
             }
-            self.is_fastq = match self.line_buf[0] {
+            self.is_fastq = match trim_crlf(&self.line_buf)[0] {
                 b'>' => false,
                 b'@' => true,
                 _ => return Some(Err(FastxErr::InvalidFormat)), // not a valid fasta/q record
             };
         } else {
             // not the first record
-            std::mem::swap(&mut self.line_buf, self.lookahead_line.as_mut().unwrap());
-            self.lookahead_line = None;
+            std::mem::swap(&mut self.line_buf, &mut self.lookahead_line);
+            self.has_lookahead = false;
         }
 
         // extract header from the header line and store it into record_buf
-        let header: &[u8] = &trim_crlf(&self.line_buf)[1..];
+        let header_line = trim_crlf(&self.line_buf);
+        let header: &[u8] = &header_line[1..];
         self.record_buf.extend_from_slice(header);
         let header_end = self.record_buf.len();
 
         // --- Step 2: read Sequence ---
 
         loop {
-            match self.read_line_fill_buf() {
-                Ok(0) => break,                                 // EOF,
-                Ok(_) if self.line_buf[0] == b'\n' => continue, // empty line with only '\n'
-                Ok(_) => {
-                    let first = self.line_buf[0];
+            match self.read_next_nonempty_line() {
+                Ok(false) => break,
+                Ok(true) => {
+                    let line = trim_crlf(&self.line_buf);
+                    let first = line[0];
 
                     // next FASTA record
                     if first == b'>' {
-                        // self.lookahead_line = Some(self.line_buf.clone());
-                        self.lookahead_line = Some(std::mem::take(&mut self.line_buf));
+                        std::mem::swap(&mut self.line_buf, &mut self.lookahead_line);
+                        self.has_lookahead = true;
                         break;
                     }
 
@@ -129,9 +142,9 @@ impl<R: BufRead> Reader<R> {
                         break;
                     }
 
-                    self.record_buf.extend_from_slice(trim_crlf(&self.line_buf));
+                    self.record_buf.extend_from_slice(line);
                 }
-                Err(e) => return Some(Err(FastxErr::IOError(e))),
+                Err(e) => return Some(Err(e)),
             }
         }
 
@@ -144,24 +157,23 @@ impl<R: BufRead> Reader<R> {
             let mut qual_read_len = 0;
 
             while qual_read_len < seq_len {
-                match self.read_line_fill_buf() {
-                    Ok(0) => break,                                 // Unexpected EOF in FASTQ
-                    Ok(_) if self.line_buf[0] == b'\n' => continue, // empty line with only '\n'
-                    Ok(_) => {
-                        let clean_qual: &[u8] = trim_crlf(&self.line_buf);
-                        self.record_buf.extend_from_slice(clean_qual);
-                        qual_read_len += clean_qual.len();
+                match self.read_next_nonempty_line() {
+                    Ok(false) => break, // Unexpected EOF in FASTQ
+                    Ok(true) => {
+                        let line = trim_crlf(&self.line_buf);
+                        self.record_buf.extend_from_slice(line);
+                        qual_read_len += line.len();
+
+                        if qual_read_len > seq_len {
+                            return Some(Err(FastxErr::UnequalSeqAndQual(seq_len, qual_read_len)));
+                        }
                     }
-                    Err(e) => return Some(Err(FastxErr::IOError(e))),
+                    Err(e) => return Some(Err(e)),
                 }
             }
 
-            if self.record_buf.len() - seq_end > seq_len {
-                // self.record_buf.truncate(seq_end + seq_len);
-                return Some(Err(FastxErr::UnequalSeqAndQual(
-                    seq_len,
-                    self.record_buf.len() - seq_end,
-                )));
+            if qual_read_len != seq_len {
+                return Some(Err(FastxErr::UnequalSeqAndQual(seq_len, qual_read_len)));
             }
         }
 
@@ -170,10 +182,6 @@ impl<R: BufRead> Reader<R> {
         let seq_slice: &[u8] = &buf_slice[header_end..seq_end];
 
         let qual_slice: Option<&[u8]> = if self.is_fastq {
-            let q_len: usize = buf_slice.len() - seq_end;
-            if q_len != seq_slice.len() {
-                return Some(Err(FastxErr::UnequalSeqAndQual(seq_slice.len(), q_len)));
-            }
             Some(&buf_slice[seq_end..])
         } else {
             None
@@ -182,8 +190,8 @@ impl<R: BufRead> Reader<R> {
         if self.parse_id {
             let (id, desc) = parse_header(id_slice);
             return Some(Ok(Seq {
-                id: id,
-                desc: desc,
+                id,
+                desc,
                 seq: seq_slice,
                 qual: qual_slice,
             }));
@@ -197,39 +205,26 @@ impl<R: BufRead> Reader<R> {
     }
 }
 
+#[inline]
 fn parse_header(line: &[u8]) -> (&[u8], &[u8]) {
-    // match line.iter().position(|&b| b == b' ' || b == b'\t') {
-    //     Some(id_end) => {
-    //         let id_slice = &line[0..id_end]; // id_end might be 0
-    //         let remainder = &line[id_end..];
-    //         let desc_start_offset = remainder
-    //             .iter()
-    //             .position(|&b| b != b' ' && b != b'\t')
-    //             .unwrap_or(remainder.len());
-    //         (id_slice, &line[id_end + desc_start_offset..])
-    //     }
-    //     None => (line, &[]), // no blank or tab
-    // }
+    let Some(id_end) = memchr2(b' ', b'\t', line) else {
+        return (line, &[]);
+    };
 
-    let mut i = 0;
-    let n = line.len();
-
-    while i < n && line[i] != b' ' && line[i] != b'\t' {
-        i += 1;
-    }
-    let id = &line[..i];
-
-    while i < n && (line[i] == b' ' || line[i] == b'\t') {
-        i += 1;
+    let mut desc_start = id_end;
+    while desc_start < line.len() && matches!(line[desc_start], b' ' | b'\t') {
+        desc_start += 1;
     }
 
-    (id, &line[i..])
+    (&line[..id_end], &line[desc_start..])
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::{BufReader, Cursor};
+
+    // --------------------------------------------------------------------------
 
     fn read_to_owned_from_reader<R: BufRead>(
         reader: R,
@@ -256,6 +251,9 @@ mod tests {
         read_to_owned_from_reader(Cursor::new(input.as_bytes()))
     }
 
+    // --------------------------------------------------------------------------
+    // empty file or invalid format edge cases
+
     #[test]
     fn test_fasta_edge_cases_empty_file() {
         let input = "";
@@ -279,6 +277,17 @@ mod tests {
     }
 
     #[test]
+    fn test_fasta_edge_cases_blank_file_crlf() {
+        let input = "\r\n";
+        let results = read_to_owned(input);
+
+        assert!(results.is_ok());
+        let seqs = results.unwrap();
+
+        assert_eq!(seqs.len(), 0);
+    }
+
+    #[test]
     fn test_fasta_edge_cases_blank_file_space() {
         let input = " ";
         let results = read_to_owned(input);
@@ -288,11 +297,22 @@ mod tests {
 
     #[test]
     fn test_fasta_edge_cases_blank_file_space_and_lf() {
+        let input = " \n";
+        let results = read_to_owned(input);
+
+        assert!(matches!(results.unwrap_err(), FastxErr::InvalidFormat));
+    }
+
+    #[test]
+    fn test_fasta_edge_cases_blank_file_lf_and_space_and_lf() {
         let input = "\n \n";
         let results = read_to_owned(input);
 
         assert!(matches!(results.unwrap_err(), FastxErr::InvalidFormat));
     }
+
+    // --------------------------------------------------------------------------
+    // valid formats
 
     #[test]
     fn test_fasta_standard_single_and_multi_line() {
@@ -371,6 +391,9 @@ II
         assert_eq!(seqs[1].2, "ACGT");
         assert_eq!(seqs[1].3, Some("IIII".to_string()));
     }
+
+    // --------------------------------------------------------------------------
+    // valid edge cases
 
     #[test]
     fn test_fasta_edge_cases_empty_seq() {
@@ -473,6 +496,9 @@ ACGT
         assert_eq!(seqs[3].2, "");
     }
 
+    // --------------------------------------------------------------------------
+    // invalid formats
+
     #[test]
     fn test_fastq_unequal_seq_qual_length() {
         let input = "\
@@ -508,6 +534,9 @@ KKKKK
         ));
     }
 
+    // --------------------------------------------------------------------------
+    // windows line endings and blank lines
+
     #[test]
     fn test_fasta_crlf_windows_line_endings() {
         let input = ">win\r\nACGT\r\n>win2\r\nTGCA\r\n";
@@ -521,6 +550,24 @@ KKKKK
         assert_eq!(seqs[0].2, "ACGT");
         assert_eq!(seqs[1].2, "TGCA");
     }
+
+    #[test]
+    fn test_fasta_crlf_blank_lines_are_skipped() {
+        let input = "\r\n>win\r\nACGT\r\n\r\n>win2\r\nTGCA\r\n";
+        let results = read_to_owned(input);
+
+        assert!(results.is_ok());
+        let seqs = results.unwrap();
+
+        assert_eq!(seqs.len(), 2);
+        assert_eq!(seqs[0].0, "win");
+        assert_eq!(seqs[0].2, "ACGT");
+        assert_eq!(seqs[1].0, "win2");
+        assert_eq!(seqs[1].2, "TGCA");
+    }
+
+    // --------------------------------------------------------------------------
+    // small buffer edge cases
 
     #[test]
     fn test_fastq_small_buffer_and_no_final_lf() {
