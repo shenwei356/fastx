@@ -41,7 +41,7 @@ impl<R: BufRead> Reader<R> {
         self.parse_id = false
     }
 
-    #[inline]
+    #[inline(always)]
     fn read_line_fill_buf(&mut self) -> std::io::Result<usize> {
         self.line_buf.clear();
 
@@ -59,12 +59,12 @@ impl<R: BufRead> Reader<R> {
                     Some(pos) => {
                         // found a line ending
                         let end = pos + 1;
-                        self.line_buf.extend_from_slice(&buf[..end]);
+                        self.line_buf.extend_from_slice(&buf[..end]); // copy the line (including '\n') into line_buf
                         (end, true)
                     }
                     None => {
                         // no line ending found, consume the entire buffer and continue reading
-                        self.line_buf.extend_from_slice(buf);
+                        self.line_buf.extend_from_slice(buf); // copy the last part of the line into line_buf
                         (buf.len(), false)
                     }
                 }
@@ -73,6 +73,7 @@ impl<R: BufRead> Reader<R> {
             self.reader.consume(consumed);
             total += consumed;
 
+            // found a '\n' or reached EOF
             if done {
                 return Ok(total);
             }
@@ -80,14 +81,14 @@ impl<R: BufRead> Reader<R> {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn read_next_nonempty_line(&mut self) -> Result<bool, FastxErr> {
         loop {
             match self.read_line_fill_buf() {
-                Ok(0) => return Ok(false),
-                Ok(_) if trim_crlf(&self.line_buf).is_empty() => continue,
-                Ok(_) => return Ok(true),
-                Err(e) => return Err(FastxErr::IOError(e)),
+                Ok(0) => return Ok(false),                                 // EOF
+                Ok(_) if trim_crlf(&self.line_buf).is_empty() => continue, // skip blank lines
+                Ok(_) => return Ok(true), // non-empty line read successfully
+                Err(e) => return Err(FastxErr::IOError(e)), // I/O error occurred
             }
         }
     }
@@ -118,7 +119,7 @@ impl<R: BufRead> Reader<R> {
         // extract header from the header line and store it into record_buf
         let header_line = trim_crlf(&self.line_buf);
         let header: &[u8] = &header_line[1..];
-        self.record_buf.extend_from_slice(header);
+        self.record_buf.extend_from_slice(header); // copy from header_line (excluding the leading '>' or '@') into record_buf
         let header_end = self.record_buf.len();
 
         // --- Step 2: read Sequence ---
@@ -142,7 +143,7 @@ impl<R: BufRead> Reader<R> {
                         break;
                     }
 
-                    self.record_buf.extend_from_slice(line);
+                    self.record_buf.extend_from_slice(line); // copy the trimed sequence line into record_buf
                 }
                 Err(e) => return Some(Err(e)),
             }
@@ -161,7 +162,7 @@ impl<R: BufRead> Reader<R> {
                     Ok(false) => break, // Unexpected EOF in FASTQ
                     Ok(true) => {
                         let line = trim_crlf(&self.line_buf);
-                        self.record_buf.extend_from_slice(line);
+                        self.record_buf.extend_from_slice(line); // copy the trimed quality line into record_buf
                         qual_read_len += line.len();
 
                         if qual_read_len > seq_len {
