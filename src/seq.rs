@@ -15,45 +15,94 @@ impl<'a> Seq<'a> {
         self.seq.len()
     }
 
-    pub fn rc(&self) -> Vec<u8> {
-        self.seq
-            .iter()
-            .rev()
-            .map(|&base| RC_TABLE[base as usize])
-            .collect()
+    pub fn is_empty(&self) -> bool {
+        self.seq.is_empty()
     }
 
-    pub fn rc_unsafe(&self) -> Vec<u8> {
+    pub fn rc(&self) -> Vec<u8> {
+        // self.seq
+        //     .iter()
+        //     .rev()
+        //     .map(|&base| RC_TABLE[base as usize])
+        //     .collect()
+
         let mut result = Vec::with_capacity(self.seq.len());
-        let rc_ptr = RC_TABLE.as_ptr();
         for &base in self.seq.iter().rev() {
-            result.push(unsafe { *rc_ptr.add(base as usize) });
+            result.push(RC_TABLE[base as usize]);
         }
         result
     }
 
+    pub fn rc_unsafe(&self) -> Vec<u8> {
+        // let mut result = Vec::with_capacity(self.seq.len());
+        // let rc_ptr = RC_TABLE.as_ptr();
+        // for &base in self.seq.iter().rev() {
+        //     result.push(unsafe { *rc_ptr.add(base as usize) });
+        // }
+
+        let len = self.seq.len();
+        let mut result = Vec::with_capacity(len);
+        let rc_ptr = RC_TABLE.as_ptr();
+        for (slot, &base) in result
+            .spare_capacity_mut() // provides a mutable slice of the uninitialized capacity
+            .iter_mut()
+            .zip(self.seq.iter().rev())
+        {
+            slot.write(unsafe { *rc_ptr.add(base as usize) });
+        }
+        unsafe { result.set_len(len) }; // mark the initialized length after writing to the spare capacity
+        result
+    }
+
     pub fn count_base(&self, base: u8) -> usize {
-        self.seq.iter().copied().filter(|&b| b == base).count()
+        // self.seq.iter().copied().filter(|&b| b == base).count()
+
+        let mut count = 0;
+        for &b in self.seq {
+            count += (b == base) as usize;
+        }
+        count
     }
 
     pub fn count_base_fn(&self, f: fn(&u8) -> bool) -> usize {
-        self.seq.iter().copied().filter(f).count()
+        //  self.seq.iter().copied().filter(f).count()
+
+        let mut count = 0;
+        for b in self.seq {
+            count += f(b) as usize;
+        }
+        count
     }
 
     pub fn count_bases(&self, bases: &[u8]) -> usize {
-        let mut table = [0u8; 256];
-        for b in bases {
-            table[*b as usize] = 1;
+        // let mut table = [0u8; 256];
+        // for b in bases {
+        //     table[*b as usize] = 1;
+        // }
+
+        // self.seq.iter().map(|&b| table[b as usize] as usize).sum()
+
+        let mut mask = [0u64; 4];
+        for &base in bases {
+            let index = (base >> 6) as usize;
+            let bit = 1u64 << (base & 63);
+            mask[index] |= bit;
         }
 
-        self.seq.iter().map(|&b| table[b as usize] as usize).sum()
+        let mut count = 0;
+        for &b in self.seq {
+            let index = (b >> 6) as usize;
+            let bit = 1u64 << (b & 63);
+            count += ((mask[index] & bit) != 0) as usize;
+        }
+        count
     }
 
     pub fn gc_content(&self) -> f32 {
-        if self.seq.len() == 0 {
+        if self.seq.is_empty() {
             return 0.0;
         }
-        self.count_base_fn(|&b| matches!(b, b'A' | b'C' | b'G' | b'T')) as f32 / self.len() as f32
+        self.count_base_fn(|&b| matches!(b, b'G' | b'C' | b'g' | b'c')) as f32 / self.len() as f32
     }
 }
 
@@ -116,7 +165,7 @@ mod tests {
         Seq {
             id: b"",
             desc: b"",
-            seq: seq,
+            seq,
             qual: None,
         }
     }
