@@ -1,9 +1,13 @@
 use crate::errors::*;
 use crate::seq::*;
 use crate::util::*;
+use crate::xopen::*;
 use memchr::{memchr, memchr2};
 use std::io::BufRead;
 
+/// A FASTA/Q reader that can read from any BufRead.
+/// It supports both FASTA and FASTQ formats,
+/// and can automatically detect the format based on the first non-empty line.
 pub struct Reader<R: BufRead> {
     reader: R,
 
@@ -18,13 +22,27 @@ pub struct Reader<R: BufRead> {
 }
 
 impl Reader<Box<dyn BufRead>> {
+    /// Creates a new Reader from a file path.
+    /// Stdin is supported by passing "-" as the file path.
+    /// The reader will take ownership of the file reader.
     pub fn new(file: &str) -> Result<Self, FastxErr> {
-        let r: Box<dyn BufRead> = xopen(file, 65536).map_err(FastxErr::IOError)?;
+        Self::new_with_buffer_alignment(file, 65536, DEFAULT_IO_BUFFER_ALIGNMENT)
+    }
+
+    /// Creates a new Reader from a file path with specified buffer size and alignment.
+    pub fn new_with_buffer_alignment(
+        file: &str,
+        buf_size: usize,
+        buf_align: usize,
+    ) -> Result<Self, FastxErr> {
+        let r: Box<dyn BufRead> =
+            xopen_with_alignment(file, buf_size, buf_align).map_err(FastxErr::IOError)?;
         Ok(Self::from_reader(r))
     }
 }
 
 impl<R: BufRead> Reader<R> {
+    /// Creates a new Reader from any BufRead. The reader will take ownership of the provided BufRead.
     pub fn from_reader(reader: R) -> Self {
         Self {
             reader,
@@ -41,6 +59,7 @@ impl<R: BufRead> Reader<R> {
         self.parse_id = false
     }
 
+    // read a line into line_buf, return the number of bytes consumed from the reader
     #[inline(always)]
     fn read_line_fill_buf(&mut self) -> std::io::Result<usize> {
         self.line_buf.clear();
@@ -94,6 +113,8 @@ impl<R: BufRead> Reader<R> {
         }
     }
 
+    // read the next non-empty line and append it to record_buf,
+    // return the outcome of the read operation
     #[inline(always)]
     fn read_next_nonempty_line_into_record_buf(
         &mut self,
@@ -108,6 +129,7 @@ impl<R: BufRead> Reader<R> {
                     return Ok(ReadLineOutcome::Eof);
                 }
 
+                // find the position of the first '\n' in the buffer and determine if we can take the fast path
                 memchr(b'\n', buf).map(|pos| {
                     let consumed = pos + 1;
                     let line = trim_crlf(&buf[..consumed]);
@@ -119,15 +141,19 @@ impl<R: BufRead> Reader<R> {
                 })
             };
 
+            // if the fast path is available, we can process the line directly from the buffer without copying to line_buf
             if let Some((consumed, line_len, first_char, needs_copy)) = fast_path {
                 // skip blank lines
                 if line_len == 0 {
-                    self.reader.consume(consumed);
+                    self.reader.consume(consumed); // do not forget to consume the buffer for blank lines
                     continue;
                 }
 
+                // if it's a header line that requires lookahead,
+                //we need to copy it to lookahead_line to avoid borrowing issues
                 if needs_copy {
-                    // read the buffer again to get the header line for copying
+                    // we have to read the buffer again because we haven't consumed it yet,
+                    // and we need to copy the header line to lookahead_line for lookahead
                     let buf = self.reader.fill_buf().map_err(FastxErr::IOError)?;
                     self.lookahead_line.clear();
                     self.lookahead_line.extend_from_slice(&buf[..consumed]);
@@ -136,6 +162,7 @@ impl<R: BufRead> Reader<R> {
                     return Ok(ReadLineOutcome::NextHeader);
                 }
 
+                // if it's a FASTQ separator line, we can directly return the outcome without copying
                 if matches!(first_char, Some(b'+') if stop_on_fastq_sep) {
                     self.reader.consume(consumed);
                     return Ok(ReadLineOutcome::FastqSep);
@@ -149,7 +176,28 @@ impl<R: BufRead> Reader<R> {
                 return Ok(ReadLineOutcome::Appended(line_len));
             }
 
-            // fallback to the slow path if no '\n' is found in the buffer
+            // no '\n' is found in the buffer
+
+            // if the first character indicates a potential LONG header or FASTQ separator,
+            // we need to read the line using the slow path to properly handle
+            // lookahead and avoid borrowing issues.
+            // Otherwise, we can directly read the line into record_buf using the
+            // slow path without worrying about lookahead.
+            let first_char = {
+                let buf = self.reader.fill_buf().map_err(FastxErr::IOError)?;
+                if buf.is_empty() {
+                    return Ok(ReadLineOutcome::Eof);
+                }
+                buf[0]
+            };
+            if !matches!(first_char, b'>' if stop_on_fasta_header)
+                && !matches!(first_char, b'+' if stop_on_fastq_sep)
+            {
+                return self.read_long_line_into_record_buf();
+            }
+
+            // otherwise, we need to read the line using the slow path to
+            // properly handle lookahead and avoid borrowing issues.
             match self.read_line_fill_buf() {
                 Ok(0) => return Ok(ReadLineOutcome::Eof),
                 Ok(_) => {
@@ -176,7 +224,73 @@ impl<R: BufRead> Reader<R> {
         }
     }
 
+    #[inline(always)]
+    fn read_long_line_into_record_buf(&mut self) -> Result<ReadLineOutcome, FastxErr> {
+        let mut line_len = 0;
+        let mut pending_cr = false;
+
+        loop {
+            let step = {
+                let buf = self.reader.fill_buf().map_err(FastxErr::IOError)?;
+                if buf.is_empty() {
+                    if line_len == 0 && !pending_cr {
+                        return Ok(ReadLineOutcome::Eof);
+                    }
+                    None
+                } else if let Some(pos) = memchr(b'\n', buf) {
+                    let line = &buf[..pos];
+                    let trimmed_len = if line.ends_with(b"\r") {
+                        line.len() - 1
+                    } else {
+                        line.len()
+                    };
+                    Some((pos + 1, trimmed_len, true, pos == 0, line.ends_with(b"\r")))
+                } else {
+                    let trimmed_len = if buf.ends_with(b"\r") {
+                        buf.len() - 1
+                    } else {
+                        buf.len()
+                    };
+                    Some((buf.len(), trimmed_len, false, false, buf.ends_with(b"\r")))
+                }
+            };
+
+            let Some((consumed, trimmed_len, has_lf, lf_only, ends_with_cr)) = step else {
+                return Ok(ReadLineOutcome::Appended(line_len));
+            };
+
+            let buf = self.reader.fill_buf().map_err(FastxErr::IOError)?;
+            let data = if has_lf {
+                &buf[..consumed - 1]
+            } else {
+                &buf[..consumed]
+            };
+            let data = &data[..trimmed_len];
+
+            if pending_cr && !(has_lf && lf_only) {
+                self.record_buf.push(b'\r');
+                line_len += 1;
+            }
+
+            if !data.is_empty() {
+                self.record_buf.extend_from_slice(data);
+                line_len += data.len();
+            }
+
+            pending_cr = ends_with_cr && !has_lf;
+            self.reader.consume(consumed);
+
+            if has_lf {
+                if line_len == 0 {
+                    continue;
+                }
+                return Ok(ReadLineOutcome::Appended(line_len));
+            }
+        }
+    }
+
     // returns None if EOF is reached, otherwise returns Some(Ok(Seq)) or Some(Err(e))
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<Result<Seq<'_>, FastxErr>> {
         self.record_buf.clear();
 
@@ -302,13 +416,13 @@ mod tests {
     use super::*;
     use std::io::{BufReader, Cursor};
 
+    type OwnedRecord = (String, String, String, Option<String>);
+
     // --------------------------------------------------------------------------
 
-    fn read_to_owned_from_reader<R: BufRead>(
-        reader: R,
-    ) -> Result<Vec<(String, String, String, Option<String>)>, FastxErr> {
+    fn read_to_owned_from_reader<R: BufRead>(reader: R) -> Result<Vec<OwnedRecord>, FastxErr> {
         let mut reader: Reader<R> = Reader::from_reader(reader);
-        let mut results: Vec<(String, String, String, Option<String>)> = Vec::new();
+        let mut results: Vec<OwnedRecord> = Vec::new();
 
         while let Some(res) = reader.next() {
             let seq = res?;
@@ -323,9 +437,7 @@ mod tests {
         Ok(results)
     }
 
-    fn read_to_owned(
-        input: &str,
-    ) -> Result<Vec<(String, String, String, Option<String>)>, FastxErr> {
+    fn read_to_owned(input: &str) -> Result<Vec<OwnedRecord>, FastxErr> {
         read_to_owned_from_reader(Cursor::new(input.as_bytes()))
     }
 
@@ -685,5 +797,25 @@ TGCA";
         assert_eq!(seqs[0].2, "ACGT");
         assert_eq!(seqs[1].0, "seq2");
         assert_eq!(seqs[1].2, "TGCA");
+    }
+
+    #[test]
+    fn test_fasta_long_single_line_keeps_line_buf_small() {
+        let seq = "ACGT".repeat(4096);
+        let input = format!(">seq1\n{seq}\n>seq2\nTGCA\n");
+        let reader = BufReader::with_capacity(3, Cursor::new(input.as_bytes()));
+        let mut reader: Reader<_> = Reader::from_reader(reader);
+
+        {
+            let record = reader.next().unwrap().unwrap();
+            assert_eq!(record.id, b"seq1");
+            assert_eq!(record.seq, seq.as_bytes());
+        }
+
+        assert!(reader.line_buf.capacity() < seq.len() / 2);
+
+        let record = reader.next().unwrap().unwrap();
+        assert_eq!(record.id, b"seq2");
+        assert_eq!(record.seq, b"TGCA");
     }
 }
