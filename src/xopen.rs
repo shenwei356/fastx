@@ -147,13 +147,13 @@ impl<R: Read> BufRead for AlignedBufReader<R> {
 }
 
 /// AlignedBufWriter is a buffered writer that uses an aligned buffer for efficient I/O operations.
-struct AlignedBufWriter<W> {
+struct AlignedBufWriter<W: Write> {
     inner: W, // the underlying writer that will receive the data when the buffer is flushed
     buf: AlignedBytes, // the internal aligned buffer used for writing data before flushing to the inner writer
     filled: usize, // the amount of data currently filled in the buffer that has not yet been flushed to the inner writer
 }
 
-impl<W> AlignedBufWriter<W> {
+impl<W: Write> AlignedBufWriter<W> {
     // Create a new AlignedBufWriter with the specified capacity, alignment, and inner writer.
     fn with_capacity_and_alignment(
         capacity: usize,
@@ -187,6 +187,12 @@ impl<W: Write> AlignedBufWriter<W> {
         }
         self.filled = 0;
         Ok(())
+    }
+}
+
+impl<W: Write> Drop for AlignedBufWriter<W> {
+    fn drop(&mut self) {
+        let _ = self.flush();
     }
 }
 
@@ -358,6 +364,50 @@ pub fn xwrite_with_alignment(
     };
 
     Ok(writer)
+}
+
+#[cfg(test)]
+mod xwrite_drop_tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_path(suffix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("fastx-xopen-test-{}-{nanos}{suffix}", std::process::id()))
+    }
+
+    #[test]
+    fn test_xwrite_flushes_on_drop_for_plain_file() {
+        let path = temp_path(".fa");
+        {
+            let mut writer = xwrite(path.to_str().unwrap(), 8192).unwrap();
+            writer.write_all(b">chr1\nACGT\n>chrM\nTGCA\n").unwrap();
+        }
+
+        let content = fs::read(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        assert_eq!(content, b">chr1\nACGT\n>chrM\nTGCA\n");
+    }
+
+    #[test]
+    fn test_xwrite_flushes_on_drop_for_gzip_file() {
+        let path = temp_path(".fa.gz");
+        {
+            let mut writer = xwrite(path.to_str().unwrap(), 8192).unwrap();
+            writer.write_all(b">chr1\nACGT\n>chrM\nTGCA\n").unwrap();
+        }
+
+        let mut reader = xopen(path.to_str().unwrap(), 8192).unwrap();
+        let mut content = Vec::new();
+        reader.read_to_end(&mut content).unwrap();
+        fs::remove_file(&path).unwrap();
+        assert_eq!(content, b">chr1\nACGT\n>chrM\nTGCA\n");
+    }
 }
 
 #[cfg(test)]
