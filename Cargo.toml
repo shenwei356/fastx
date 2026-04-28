@@ -12,7 +12,6 @@ repository = "https://github.com/shenwei356/fastx"
 readme = "README.md"
 
 [dependencies]
-buffer-redux = "1"
 bzip2 = "0.6"
 flate2 = "1"
 liblzma = "0.3"

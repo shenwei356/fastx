@@ -64,9 +64,8 @@ impl<'a> Seq<'a> {
         count
     }
 
-    pub fn count_base_fn(&self, f: fn(&u8) -> bool) -> usize {
-        //  self.seq.iter().copied().filter(f).count()
-
+    // pub fn count_base_fn(&self, f: fn(&u8) -> bool) -> usize {
+    pub fn count_base_fn<F: Fn(&u8) -> bool>(&self, f: F) -> usize {
         let mut count = 0;
         for b in self.seq {
             count += f(b) as usize;
@@ -102,7 +101,11 @@ impl<'a> Seq<'a> {
         if self.seq.is_empty() {
             return 0.0;
         }
-        self.count_base_fn(|&b| matches!(b, b'G' | b'C' | b'g' | b'c')) as f32 / self.len() as f32
+        let mut gc = 0usize;
+        for &b in self.seq {
+            gc += matches!(b, b'G' | b'C' | b'g' | b'c') as usize;
+        }
+        gc as f32 / self.seq.len() as f32
     }
 }
 

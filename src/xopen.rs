@@ -378,7 +378,10 @@ mod xwrite_drop_tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("fastx-xopen-test-{}-{nanos}{suffix}", std::process::id()))
+        std::env::temp_dir().join(format!(
+            "fastx-xopen-test-{}-{nanos}{suffix}",
+            std::process::id()
+        ))
     }
 
     #[test]
