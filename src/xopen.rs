@@ -2,7 +2,7 @@ use bzip2::read::{BzDecoder, BzEncoder};
 use flate2::Compression;
 use flate2::read::{GzDecoder, GzEncoder};
 use liblzma::read::{XzDecoder, XzEncoder};
-use std::alloc::{Layout, alloc_zeroed, dealloc};
+use std::alloc::{Layout, alloc, dealloc};
 use std::fs::File;
 use std::io::IsTerminal;
 use std::io::{self, BufRead, Read, Write};
@@ -34,7 +34,9 @@ impl AlignedBytes {
         })?;
 
         // allocate zeroed memory for the buffer and ensure it's non-null
-        let ptr = unsafe { alloc_zeroed(layout) };
+        // let ptr = unsafe { alloc_zeroed(layout) }
+        // zeroing is not strictly necessary for I/O buffers, and can be a performance hit, so we can skip it
+        let ptr = unsafe { alloc(layout) };
         // check if allocation succeeded and create a NonNull pointer
         let ptr = NonNull::new(ptr)
             .ok_or_else(|| io::Error::other("failed to allocate aligned I/O buffer"))?;
@@ -197,25 +199,15 @@ impl<W: Write> Drop for AlignedBufWriter<W> {
 }
 
 impl<W: Write> Write for AlignedBufWriter<W> {
-    // write data to the internal buffer, and if the buffer is full or the incoming data is larger than the buffer,
-    // flush the buffer to the inner writer before writing more data, ensuring efficient use of the
     fn write(&mut self, data: &[u8]) -> io::Result<usize> {
-        // if the internal buffer is currently empty and the incoming data is larger than or equal to the buffer size,
-        // we can bypass the internal buffer and write directly to the inner writer for better performance
+        // flush first if data does not fit in the remaining buffer space
+        if data.len() > self.buf.len - self.filled {
+            self.flush_buf()?;
+        }
+        // bypass the buffer entirely when the buffer is empty and data fills it completely
         if self.filled == 0 && data.len() >= self.buf.len {
             return self.inner.write(data);
         }
-
-        // if the incoming data does not fit in the remaining space of the internal buffer,
-        // we need to flush the buffer first
-        if data.len() > self.buf.len - self.filled {
-            self.flush_buf()?;
-            if data.len() >= self.buf.len {
-                return self.inner.write(data);
-            }
-        }
-
-        // copy the incoming data to the internal buffer and update the filled count accordingly
         let end = self.filled + data.len();
         self.buf.as_mut_slice()[self.filled..end].copy_from_slice(data);
         self.filled = end;
@@ -325,7 +317,7 @@ pub fn xwrite_with_alignment(
         return Ok(Box::new(AlignedBufWriter::with_capacity_and_alignment(
             buf_size,
             buf_align,
-            io::stdout(),
+            io::stdout().lock(),
         )?));
     }
 
