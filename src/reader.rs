@@ -494,7 +494,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("fastx-test-{}-{nanos}{suffix}", std::process::id()))
+        std::env::temp_dir().join(format!("fastseq-test-{}-{nanos}{suffix}", std::process::id()))
     }
 
     fn read_file_to_owned(path: &str) -> Result<Vec<OwnedRecord>, FastxErr> {
@@ -1072,7 +1072,7 @@ mod bgzf_tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("fastx-bgzf-{}-{nanos}{suffix}", std::process::id()))
+        std::env::temp_dir().join(format!("fastseq-bgzf-{}-{nanos}{suffix}", std::process::id()))
     }
 
     #[test]

@@ -1,12 +1,10 @@
-## fastseq
+//! Read FASTA/Q records from stdin and write the number of records, total bases
+//!
+//! Usage:
+//!     cat input.fa          | cargo run --release --example count_seqs
+//!     echo -ne ">s\nATCG\n" | cargo run --release --example count_seqs
+//!     zcat input.fq.gz      | cargo run --release --example count_seqs
 
-fastseq is a high-performance Rust crate for parsing FASTA/Q sequences, for learning purposes.
-
-It seemlessly parses FASTA/Q records from either plain files, (gzip, xz, bzip2, zstd, and lz4) compressed files or STDIN.
-
-## Examples
-
-```rust
 use std::error::Error;
 
 use fastseq::Reader;
@@ -33,18 +31,3 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     Ok(())
 }
-```
-
-
-## Benchmarking
-
-see [fastx-tools](https://github.com/shenwei356/fastx-tools)
-
-
-## Reference
-
-- [needletail](https://github.com/onecodex/needletail)
-
-## License
-
-[MIT License](https://github.com/shenwei356/fastseq/blob/master/LICENSE)

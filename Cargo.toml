@@ -1,20 +1,26 @@
 [package]
 authors = ["Wei Shen <shenwei356@gmail.com>"]
-name = "fastx"
+name = "fastseq"
 version = "0.1.4"
 edition = "2024"
-description = "fastx is a Rust crate for parsing and writing FASTA/Q sequences"
+description = "fastseq is a Rust crate for parsing FASTA/Q sequences"
 keywords = ["bioinformatics", "fasta", "fastq"]
-categories = ["command-line-utilities", "science"]
-homepage = "https://github.com/shenwei356/fastx"
-documentation = "https://github.com/shenwei356/fastx"
-repository = "https://github.com/shenwei356/fastx"
+categories = ["parsing", "science"]
+homepage = "https://github.com/shenwei356/fastseq"
+documentation = "https://crates.io/crates/fastseq"
+repository = "https://github.com/shenwei356/fastseq"
 readme = "README.md"
+license-file = "LICENSE"
 
 [dependencies]
 bzip2 = "0.6"
-flate2 = "1"
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+gzp = { version = "2", default-features = false, features = [
+    "deflate",
+    "flate2",
+] }
 liblzma = "0.3"
+lz4_flex = "0.13"
 memchr = "2"
 thiserror = "2"
 zstd = "0.13"

@@ -1,4 +1,6 @@
 #[derive(Debug, Clone, Copy)]
+
+/// A struct representing a biological sequence, which can be either DNA or RNA, and may include quality scores if it's from a FASTQ file.
 pub struct Seq<'a> {
     pub id: &'a [u8],
     pub desc: &'a [u8],
@@ -7,18 +9,22 @@ pub struct Seq<'a> {
 }
 
 impl<'a> Seq<'a> {
+    /// Checks if the sequence has quality scores, which indicates it's from a FASTQ file.
     pub fn is_fastq(&self) -> bool {
         self.qual.is_some()
     }
 
+    /// Returns the length of the sequence.
     pub fn len(&self) -> usize {
         self.seq.len()
     }
 
+    /// Checks if the sequence is empty.
     pub fn is_empty(&self) -> bool {
         self.seq.is_empty()
     }
 
+    /// Returns the reverse complement of the sequence.
     pub fn rc(&self) -> Vec<u8> {
         // self.seq
         //     .iter()
@@ -33,6 +39,7 @@ impl<'a> Seq<'a> {
         result
     }
 
+    /// Returns the reverse complement of the sequence using unsafe code for potentially improved performance.
     pub fn rc_unsafe(&self) -> Vec<u8> {
         // let mut result = Vec::with_capacity(self.seq.len());
         // let rc_ptr = RC_TABLE.as_ptr();
@@ -54,6 +61,7 @@ impl<'a> Seq<'a> {
         result
     }
 
+    /// Counts the occurrences of a specific base in the sequence.
     pub fn count_base(&self, base: u8) -> usize {
         // self.seq.iter().copied().filter(|&b| b == base).count()
 
@@ -64,8 +72,9 @@ impl<'a> Seq<'a> {
         count
     }
 
-    // pub fn count_base_fn(&self, f: fn(&u8) -> bool) -> usize {
+    /// Counts the occurrences of any base in the provided list of bases.
     pub fn count_base_fn<F: Fn(&u8) -> bool>(&self, f: F) -> usize {
+        // pub fn count_base_fn(&self, f: fn(&u8) -> bool) -> usize {
         let mut count = 0;
         for b in self.seq {
             count += f(b) as usize;
@@ -73,6 +82,7 @@ impl<'a> Seq<'a> {
         count
     }
 
+    /// Counts the occurrences of any base in the provided list of bases using a bitmask for efficient lookup.
     pub fn count_bases(&self, bases: &[u8]) -> usize {
         // let mut table = [0u8; 256];
         // for b in bases {
@@ -81,10 +91,14 @@ impl<'a> Seq<'a> {
 
         // self.seq.iter().map(|&b| table[b as usize] as usize).sum()
 
+        // Create a bitmask for the provided bases. Each base corresponds to a bit in the mask, allowing for O(1) membership checks.
         let mut mask = [0u64; 4];
+        // We need 4 u64 values to cover all 256 possible byte values (4 * 64 = 256).
         for &base in bases {
             let index = (base >> 6) as usize;
+            // Determine which 64-bit block to use based on the base value (0-255).
             let bit = 1u64 << (base & 63);
+            // Determine which bit within the block to set based on the base value (0-63).
             mask[index] |= bit;
         }
 
@@ -97,18 +111,23 @@ impl<'a> Seq<'a> {
         count
     }
 
+    // Calculates the GC content of the sequence, which is the proportion of bases that are either G or C.
     pub fn gc_content(&self) -> f32 {
         if self.seq.is_empty() {
             return 0.0;
         }
         let mut gc = 0usize;
         for &b in self.seq {
+            // Increment the GC count for each G or C base, accounting for both uppercase and lowercase letters.
             gc += matches!(b, b'G' | b'C' | b'g' | b'c') as usize;
         }
         gc as f32 / self.seq.len() as f32
     }
 }
 
+/// A lookup table for reverse complementing DNA/RNA sequences,
+/// including support for IUPAC ambiguity codes and gaps.
+/// Each byte value (0-255) maps to its reverse complement, with non-standard bases defaulting to 'N'.
 const RC_TABLE: [u8; 256] = make_rc_table();
 
 const fn make_rc_table() -> [u8; 256] {

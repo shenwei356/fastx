@@ -3,6 +3,7 @@
 ### v0.1.4 - 2026-04-29
 
 - Fix reading concatenated gzip files. 
+- Add reading and writing LZ4 format.
 
 ### v0.1.3 - 2026-04-28
 

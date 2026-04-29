@@ -1,9 +1,13 @@
 use bzip2::read::{BzDecoder, BzEncoder};
 use flate2::Compression;
-// Don't use GzDecoder since it doesn't support concatenated gzip files,
-// which are common in bioinformatics.
-// use flate2::read::{GzDecoder, GzEncoder};
-use flate2::read::{GzEncoder, MultiGzDecoder};
+// Use the bufread variant of MultiGzDecoder so it can directly consume the
+// underlying BufRead's buffer instead of going through an extra internal one.
+// MultiGzDecoder (rather than GzDecoder) is required to handle concatenated
+// gzip files, which are common in bioinformatics.
+use flate2::bufread::MultiGzDecoder;
+use gzp::ZWriter;
+use gzp::deflate::Gzip;
+use gzp::par::compress::{ParCompress, ParCompressBuilder};
 use liblzma::read::{XzDecoder, XzEncoder};
 use std::alloc::{Layout, alloc, dealloc};
 use std::fs::File;
@@ -224,7 +228,41 @@ impl<W: Write> Write for AlignedBufWriter<W> {
     }
 }
 
+/// GzpGzipWriter wraps a parallel gzip encoder from `gzp` and ensures
+/// `finish()` is called on drop. Without `finish()`, gzp would leave the
+/// gzip stream truncated (no footer, worker threads not joined).
+struct GzpGzipWriter<W: Write + Send + 'static> {
+    inner: Option<ParCompress<'static, Gzip, W>>,
+}
+
+impl<W: Write + Send + 'static> Write for GzpGzipWriter<W> {
+    #[inline]
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.inner
+            .as_mut()
+            .expect("gzp writer used after finish")
+            .write(buf)
+    }
+
+    #[inline]
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner
+            .as_mut()
+            .expect("gzp writer used after finish")
+            .flush()
+    }
+}
+
+impl<W: Write + Send + 'static> Drop for GzpGzipWriter<W> {
+    fn drop(&mut self) {
+        if let Some(mut w) = self.inner.take() {
+            let _ = w.finish();
+        }
+    }
+}
+
 /// xopen is a helper function that opens a file for reading and returns a buffered reader that automatically detects compression formats.
+/// It supports gzip, xz, bzip2, zstd, and lz4 compression formats based on the file's magic numbers.
 pub fn xopen(file: &str, buf_size: usize) -> io::Result<Box<dyn BufRead>> {
     xopen_with_alignment(file, buf_size, DEFAULT_IO_BUFFER_ALIGNMENT)
 }
@@ -265,7 +303,7 @@ pub fn xopen_with_alignment(
     // check compression formats
     let buf = r.fill_buf()?; // peek without consuming
 
-    let reader: Box<dyn BufRead> = if buf.len() >= 2 && buf[0] == 0x1f && buf[1] == 0x8b {
+    let reader: Box<dyn BufRead> = if buf.starts_with(&[0x1f, 0x8b]) {
         // gzip
         Box::new(AlignedBufReader::with_capacity_and_alignment(
             buf_size,
@@ -293,6 +331,15 @@ pub fn xopen_with_alignment(
             buf_align,
             ZstdDecoder::new(r)?,
         )?)
+    } else if buf.starts_with(&[0x04, 0x22, 0x4D, 0x18])
+        || buf.starts_with(&[0x02, 0x21, 0x4C, 0x18])
+    {
+        // lz4
+        Box::new(AlignedBufReader::with_capacity_and_alignment(
+            buf_size,
+            buf_align,
+            lz4_flex::frame::FrameDecoder::new(r),
+        )?)
     } else {
         // no compression
         r
@@ -303,6 +350,7 @@ pub fn xopen_with_alignment(
 
 /// xwrite is a helper function that opens a file for writing
 /// and returns a buffered writer that automatically detects compression formats based on the file extension.
+/// It supports gzip, xz, bzip2, zstd, and lz4 compression formats based on the file extension.
 pub fn xwrite(path: &str, buf_size: usize) -> io::Result<Box<dyn Write>> {
     xwrite_with_alignment(path, buf_size, DEFAULT_IO_BUFFER_ALIGNMENT)
 }
@@ -325,27 +373,38 @@ pub fn xwrite_with_alignment(
     }
 
     let file = File::create(path)?;
+    let path_lc = path.to_ascii_lowercase();
 
-    let writer: Box<dyn Write> = if path.ends_with(".gz") {
+    let writer: Box<dyn Write> = if path_lc.ends_with(".gz") {
+        let parz = ParCompressBuilder::<Gzip>::new()
+            .compression_level(Compression::default())
+            .from_writer(file);
         Box::new(AlignedBufWriter::with_capacity_and_alignment(
             buf_size,
             buf_align,
-            GzEncoder::new(file, Compression::default()),
+            GzpGzipWriter { inner: Some(parz) },
         )?)
-    } else if path.ends_with(".xz") {
+    } else if path_lc.ends_with(".xz") {
         Box::new(AlignedBufWriter::with_capacity_and_alignment(
             buf_size,
             buf_align,
             XzEncoder::new(file, 6),
         )?)
-    } else if path.ends_with(".bz2") {
+    } else if path_lc.ends_with(".bz2") {
         Box::new(AlignedBufWriter::with_capacity_and_alignment(
             buf_size,
             buf_align,
             BzEncoder::new(file, bzip2::Compression::default()),
         )?)
-    } else if path.ends_with(".zst") || path.ends_with(".zstd") {
+    } else if path_lc.ends_with(".zst") || path_lc.ends_with(".zstd") {
         let encoder = ZstdEncoder::new(file, 0)?; // level 0 = default
+        Box::new(AlignedBufWriter::with_capacity_and_alignment(
+            buf_size,
+            buf_align,
+            encoder.auto_finish(),
+        )?)
+    } else if path_lc.ends_with(".lz4") {
+        let encoder = lz4_flex::frame::FrameEncoder::new(file);
         Box::new(AlignedBufWriter::with_capacity_and_alignment(
             buf_size,
             buf_align,
@@ -374,10 +433,25 @@ mod xwrite_drop_tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!(
-            "fastx-xopen-test-{}-{nanos}{suffix}",
+            "fastseq-xopen-test-{}-{nanos}{suffix}",
             std::process::id()
         ))
     }
+
+    fn roundtrip(suffix: &str, data: &[u8]) {
+        let path = temp_path(suffix);
+        {
+            let mut writer = xwrite(path.to_str().unwrap(), 8192).unwrap();
+            writer.write_all(data).unwrap();
+        }
+        let mut reader = xopen(path.to_str().unwrap(), 8192).unwrap();
+        let mut content = Vec::new();
+        reader.read_to_end(&mut content).unwrap();
+        fs::remove_file(&path).unwrap();
+        assert_eq!(content, data);
+    }
+
+    const FASTA: &[u8] = b">chr1\nACGTACGTACGT\n>chrM\nTGCATGCATGCA\n";
 
     #[test]
     fn test_xwrite_flushes_on_drop_for_plain_file() {
@@ -405,6 +479,36 @@ mod xwrite_drop_tests {
         reader.read_to_end(&mut content).unwrap();
         fs::remove_file(&path).unwrap();
         assert_eq!(content, b">chr1\nACGT\n>chrM\nTGCA\n");
+    }
+
+    #[test]
+    fn test_roundtrip_plain() {
+        roundtrip(".fa", FASTA);
+    }
+
+    #[test]
+    fn test_roundtrip_gzip() {
+        roundtrip(".fa.gz", FASTA);
+    }
+
+    #[test]
+    fn test_roundtrip_xz() {
+        roundtrip(".fa.xz", FASTA);
+    }
+
+    #[test]
+    fn test_roundtrip_bzip2() {
+        roundtrip(".fa.bz2", FASTA);
+    }
+
+    #[test]
+    fn test_roundtrip_zstd() {
+        roundtrip(".fa.zst", FASTA);
+    }
+
+    #[test]
+    fn test_roundtrip_lz4() {
+        roundtrip(".fa.lz4", FASTA);
     }
 }
 
