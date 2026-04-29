@@ -1,6 +1,9 @@
 use bzip2::read::{BzDecoder, BzEncoder};
 use flate2::Compression;
-use flate2::read::{GzDecoder, GzEncoder};
+// Don't use GzDecoder since it doesn't support concatenated gzip files,
+// which are common in bioinformatics.
+// use flate2::read::{GzDecoder, GzEncoder};
+use flate2::read::{GzEncoder, MultiGzDecoder};
 use liblzma::read::{XzDecoder, XzEncoder};
 use std::alloc::{Layout, alloc, dealloc};
 use std::fs::File;
@@ -267,7 +270,7 @@ pub fn xopen_with_alignment(
         Box::new(AlignedBufReader::with_capacity_and_alignment(
             buf_size,
             buf_align,
-            GzDecoder::new(r),
+            MultiGzDecoder::new(r),
         )?)
     } else if buf.starts_with(&[0xFD, b'7', b'z', b'X', b'Z', 0x00]) {
         // xz

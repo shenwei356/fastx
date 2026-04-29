@@ -653,6 +653,40 @@ II
         assert_eq!(seqs[1].3, Some("IIII".to_string()));
     }
 
+    #[test]
+    fn test_fastq_standard_single_and_multi_lin_with_comments_in_3rd_line() {
+        let input = "\
+@read1 desc
+ACGT
++read1 desc
+IIII
+@read2 \tdesc2
+AC
+GT
++ read2 \tdesc2
+II
+II
+";
+        let results = read_to_owned(input);
+
+        assert!(results.is_ok());
+        let seqs = results.unwrap();
+
+        assert_eq!(seqs.len(), 2);
+
+        // Record 1: 4-line FASTQ
+        assert_eq!(seqs[0].0, "read1");
+        assert_eq!(seqs[0].1, "desc");
+        assert_eq!(seqs[0].2, "ACGT");
+        assert_eq!(seqs[0].3, Some("IIII".to_string()));
+
+        // Record 2: multi-line FASTQ
+        assert_eq!(seqs[1].0, "read2");
+        assert_eq!(seqs[1].1, "desc2");
+        assert_eq!(seqs[1].2, "ACGT");
+        assert_eq!(seqs[1].3, Some("IIII".to_string()));
+    }
+
     // --------------------------------------------------------------------------
     // valid edge cases
 
@@ -1020,5 +1054,64 @@ TGCA";
             stdout.contains("2\tchrM\tTGCA"),
             "unexpected helper output: {stdout}"
         );
+    }
+}
+
+#[cfg(test)]
+mod bgzf_tests {
+    use super::*;
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+    use std::fs;
+    use std::io::Write;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_path(suffix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("fastx-bgzf-{}-{nanos}{suffix}", std::process::id()))
+    }
+
+    #[test]
+    fn test_multi_member_gzip_fastq() {
+        // Simulate a BGZF-like file: multiple concatenated gzip members
+        let path = temp_path(".fq.gz");
+        let mut file = fs::File::create(&path).unwrap();
+
+        let total_records = 500;
+        let records_per_block = 100;
+        let lengths = [50, 80, 30, 150, 10, 120, 5, 200, 75, 45];
+
+        for block in 0..(total_records / records_per_block) {
+            let mut block_data = Vec::new();
+            for i in 0..records_per_block {
+                let idx = block * records_per_block + i;
+                let len = lengths[idx % lengths.len()];
+                let seq: String = std::iter::repeat('A').take(len).collect();
+                let qual: String = std::iter::repeat('I').take(len).collect();
+                write!(block_data, "@read{}\n{}\n+\n{}\n", idx, seq, qual).unwrap();
+            }
+            // Each block is a separate gzip member
+            let mut gz = GzEncoder::new(Vec::new(), Compression::default());
+            gz.write_all(&block_data).unwrap();
+            let compressed = gz.finish().unwrap();
+            file.write_all(&compressed).unwrap();
+        }
+        drop(file);
+
+        // Now try to read with our Reader
+        let mut reader = Reader::new(path.to_str().unwrap()).unwrap();
+        let mut count = 0;
+        while let Some(res) = reader.next() {
+            let seq = res.unwrap();
+            let expected_len = lengths[count % lengths.len()];
+            assert_eq!(seq.seq.len(), expected_len, "record {} seq len", count);
+            count += 1;
+        }
+        fs::remove_file(&path).unwrap();
+        assert_eq!(count, total_records, "expected {} records, got {}", total_records, count);
     }
 }
