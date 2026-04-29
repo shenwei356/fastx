@@ -1,3 +1,6 @@
+[![Docs](https://img.shields.io/docsrs/fastseq)](https://docs.rs/fastseq)
+[![Crates.io](https://img.shields.io/crates/v/fastseq.svg)](https://crates.io/crates/fastseq)
+
 ## fastseq
 
 fastseq is a high-performance Rust crate for parsing FASTA/Q sequences, for learning purposes.
